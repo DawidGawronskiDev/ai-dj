@@ -1,6 +1,6 @@
 # AI DJ
 
-An autonomous music selector and occasional spoken host for a nightclub event, using Navidrome, GPT-6-Luna, Kokoro, Next.js, Liquidsoap, and Icecast. The controller, autonomous selection, and venue audio pipeline are runnable today; speech and the operator web interface are still to come.
+An autonomous music selector and occasional spoken host for a nightclub event, using Navidrome, GPT-6-Luna, Kokoro, Next.js, Liquidsoap, and Icecast. The controller, autonomous selection, venue audio pipeline, and operator deck are runnable today; speech is still to come.
 
 Preparation freezes a Navidrome playlist into a local event pool. The controller checks pool membership, repeats, and a 30-minute artist gap before publishing a queue. Liquidsoap plays approved local files through Icecast, reports actual starts, and continues through its loaded fallback queue if the controller disconnects. Preparation requires five hours of unique, playable audio after crossfade overlap.
 
@@ -35,6 +35,10 @@ Use a new state directory for each event. Set `MUSIC_DIR`, `STATE_DIR`, three di
 docker compose up -d --build
 ```
 
+Open the operator deck at `http://<venue-machine>:3000` and sign in with `OPERATOR_PASSWORD`. It shows the current record, progress, queue, recent plays, and controller warnings. Operators can start, resume, stop, skip, mute speech, steer the selector, and choose an approved track to queue or play next. The web service keeps the password in an HTTP-only session cookie and sends commands to the controller from the server. Set `WEB_PORT` if port 3000 conflicts; restrict access to the venue network or a trusted VPN.
+
+To run the interface without Compose, start the controller and then run `cd web && npm ci && OPERATOR_PASSWORD=your-password CONTROLLER_URL=http://127.0.0.1:8787 npm run dev`. Open `http://localhost:3000`.
+
 The controller listens on `127.0.0.1:8787` by default. Every request requires `Authorization: Bearer <OPERATOR_PASSWORD>`. For example, queue a track before starting, then inspect the state:
 
 ```sh
@@ -56,9 +60,9 @@ The local schedule contains the validated queue followed by eligible unused fall
 
 On a mixer restart, played paths are filtered from the schedule and playback continues with a fresh track. The services restart automatically after a service failure. After a full machine reboot, playback stays paused until an operator sends `POST /resume`; the interrupted track and stale queue are discarded. Extend the event first if its planned end has passed. Stop the event before shutting down services if it should stay silent on the next service start.
 
-Run `pnpm test`, `pnpm typecheck`, and `docker compose config --quiet` after changes. Liquidsoap can be checked with `docker run --rm -v "$PWD/audio/radio.liq:/radio.liq:ro" savonet/liquidsoap:v2.4.5 --check /radio.liq`.
+Run `pnpm test`, `pnpm typecheck`, `npm --prefix web run typecheck`, `npm --prefix web run build`, and `docker compose config --quiet` after changes. Liquidsoap can be checked with `docker run --rm -v "$PWD/audio/radio.liq:/radio.liq:ro" savonet/liquidsoap:v2.4.5 --check /radio.liq`.
 
-Remaining v1 work: Kokoro speech and ducking, a password-protected operator UI, and a full venue rehearsal with real audio. The Navidrome importer and OpenAI integration have mock-backed tests but have not yet been run against this venue's services or an API key. Command-to-speaker latency and fade quality still need measurement on the venue system.
+Remaining v1 work: Kokoro speech and ducking, and a full venue rehearsal with real audio. The Navidrome importer and OpenAI integration have mock-backed tests but have not yet been run against this venue's services or an API key. Command-to-speaker latency and fade quality still need measurement on the venue system.
 
 - [Agreed design and acceptance checks](docs/design-interview.md)
 - [Domain glossary](CONTEXT.md)

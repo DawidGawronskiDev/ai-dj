@@ -1,3 +1,5 @@
 node_modules/
+web/.next/
+web/*.tsbuildinfo
 .env
 state/

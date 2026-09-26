@@ -1,4 +1,14 @@
 services:
+  web:
+    build: ./web
+    restart: unless-stopped
+    depends_on:
+      - controller
+    environment:
+      OPERATOR_PASSWORD: ${OPERATOR_PASSWORD:?Set OPERATOR_PASSWORD}
+      CONTROLLER_URL: http://controller:8787
+    ports:
+      - "${WEB_PORT:-3000}:3000"
   controller:
     image: node:26-bookworm-slim
     restart: unless-stopped

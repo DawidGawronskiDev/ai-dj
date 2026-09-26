@@ -95,15 +95,20 @@ export default function Deck() {
 
   useEffect(() => {
     void loadState();
+  }, [loadState]);
+
+  useEffect(() => {
+    if (view !== "deck") return;
     const refresh = window.setInterval(() => {
       if (document.visibilityState === "visible") void loadState();
     }, 2500);
+    return () => window.clearInterval(refresh);
+  }, [loadState, view]);
+
+  useEffect(() => {
     const clock = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => {
-      window.clearInterval(refresh);
-      window.clearInterval(clock);
-    };
-  }, [loadState]);
+    return () => window.clearInterval(clock);
+  }, []);
 
   async function signIn(event: FormEvent) {
     event.preventDefault();

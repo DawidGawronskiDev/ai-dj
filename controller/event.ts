@@ -20,7 +20,7 @@ export interface QueueEntry {
 
 export interface EventState {
   id: string;
-  status: "prepared" | "running" | "stopped";
+  status: "prepared" | "running" | "paused" | "stopped";
   plannedEndMs: number;
   eventBrief: string;
   steering: string[];
@@ -196,6 +196,7 @@ export function nextFallback(state: EventState, nowMs: number): EventState | nul
 
 /** Ordered validated queue followed by unused eligible local fallback tracks. */
 export function buildSchedule(state: EventState, nowMs: number): string[] {
+  if (state.status === "stopped") return [];
   validateQueue(state, state.upcoming, nowMs);
   let startMs = state.current
     ? Math.max(nowMs, state.current.startedAtMs + trackFor(state, state.current.trackId).durationMs - CROSSFADE_MS)
@@ -203,6 +204,7 @@ export function buildSchedule(state: EventState, nowMs: number): string[] {
   const planned: PlannedTrack[] = [];
   const paths: string[] = [];
   for (const entry of state.upcoming) {
+    if (startMs >= state.plannedEndMs) break;
     const track = trackFor(state, entry.trackId);
     planned.push({ trackId: track.id, artistId: track.artistId, expectedStartMs: startMs, expectedEndMs: startMs + track.durationMs });
     paths.push(track.localPath);
@@ -210,6 +212,7 @@ export function buildSchedule(state: EventState, nowMs: number): string[] {
   }
   const remaining = new Set(state.fallbackOrder.filter((id) => !planned.some((item) => item.trackId === id)));
   while (remaining.size) {
+    if (startMs >= state.plannedEndMs) break;
     const track = state.fallbackOrder.map((id) => trackFor(state, id)).find((candidate) => remaining.has(candidate.id) && checkSelection({
       source: "fallback", trackId: candidate.id, eventPool: state.pool,
       history: selectionHistory(state), upcoming: planned, expectedStartMs: startMs,

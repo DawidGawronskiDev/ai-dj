@@ -8,7 +8,7 @@ import {
 } from "./event.ts";
 import { atomicWrite } from "./prepare.ts";
 import { syncOnce } from "./sync.ts";
-import { control } from "./control.ts";
+import { control, recoverOnStartup } from "./control.ts";
 
 type Body = Record<string, unknown>;
 
@@ -59,6 +59,7 @@ async function loadState(stateDirectory: string): Promise<EventState> {
 
 async function publish(stateDirectory: string, state: EventState): Promise<void> {
   const paths = buildSchedule(state, Date.now());
+  await atomicWrite(resolve(stateDirectory, "planned-end.txt"), `${state.plannedEndMs / 1000}\n`);
   await atomicWrite(resolve(stateDirectory, "schedule.m3u"), paths.join("\n") + (paths.length ? "\n" : ""));
 }
 
@@ -72,7 +73,15 @@ export function createControllerServer(stateDirectory: string, password: string)
   };
   const timer = setInterval(() => {
     void serial(async () => {
-      if (await syncOnce(stateDirectory)) await publish(stateDirectory, await loadState(stateDirectory));
+      const changed = await syncOnce(stateDirectory);
+      const state = await loadState(stateDirectory);
+      if (state.status === "running" && Date.now() >= Math.max(state.plannedEndMs,
+          state.current ? state.current.startedAtMs + (state.pool.find((track) => track.id === state.current!.trackId)?.durationMs ?? 0) + 1_000 : 0)) {
+        await control(stateDirectory, "stop");
+        await publish(stateDirectory, await loadState(stateDirectory));
+      } else if (changed || state.status === "running") {
+        await publish(stateDirectory, state);
+      }
     }).catch((error: unknown) => console.error("Controller sync failed:", error));
   }, 500);
   const server = createServer((request, response) => {
@@ -82,15 +91,22 @@ export function createControllerServer(stateDirectory: string, password: string)
       if (request.method === "GET" && path === "/state") { send(response, 200, await loadState(stateDirectory)); return; }
       if (request.method !== "POST") { send(response, 404, { error: "Unknown endpoint" }); return; }
       const body = await readBody(request);
-      if (path === "/start" || path === "/stop") {
-        await control(stateDirectory, path === "/start" ? "start" : "stop");
-        send(response, 200, await loadState(stateDirectory));
+      if (path === "/start" || path === "/resume" || path === "/stop") {
+        await control(stateDirectory, path === "/start" ? "start" : path === "/resume" ? "resume" : "stop");
+        const updated = await loadState(stateDirectory);
+        if (path === "/stop") await publish(stateDirectory, updated);
+        send(response, 200, updated);
         return;
       }
       const state = await loadState(stateDirectory);
       const nowMs = Date.now();
       let updated: EventState;
-      if (path === "/queue") {
+      if (path === "/skip") {
+        if (state.status !== "running" || !state.current) throw new Error("Cannot skip without a playing track");
+        await atomicWrite(resolve(stateDirectory, "skip.request"), `${nowMs}\n`);
+        send(response, 202, state);
+        return;
+      } else if (path === "/queue") {
         const source = body.source;
         if (source !== "agent" && source !== "operator") throw new Error("source must be agent or operator");
         updated = addSelection(state, requiredString(body, "trackId"), source, nowMs,
@@ -120,11 +136,12 @@ export function createControllerServer(stateDirectory: string, password: string)
       send(response, 200, updated);
     }).catch((error: unknown) => {
       const message = error instanceof Error ? error.message : "Unknown error";
-      send(response, error instanceof SyntaxError || message.startsWith("Track is ineligible") || message.startsWith("Invalid") || message.startsWith("allowRepeats") || message.includes("must be") || message.includes("committed") ? 400 : 500, { error: message });
+      send(response, error instanceof SyntaxError || message.startsWith("Track is ineligible") || message.startsWith("Invalid") || message.startsWith("Cannot skip") || message.startsWith("Only a") || message.startsWith("Planned end") || message.startsWith("allowRepeats") || message.includes("must be") || message.includes("committed") ? 400 : 500, { error: message });
     });
   });
   server.on("close", () => clearInterval(timer));
   return { server, ready: serial(async () => {
+    await recoverOnStartup(stateDirectory);
     await syncOnce(stateDirectory);
     await publish(stateDirectory, await loadState(stateDirectory));
   }) };

@@ -85,7 +85,7 @@ export async function prepare(
     history: [], current: null, upcoming: [], warnings: [],
   };
   await mkdir(stateDirectory, { recursive: true });
-  for (const file of ["event.json", "fallback.m3u", "schedule.m3u", "played.txt", "now-playing.json", "run.flag"]) {
+  for (const file of ["event.json", "fallback.m3u", "schedule.m3u", "planned-end.txt", "played.txt", "now-playing.json", "committed.json", "run.flag", "skip.request", "stop.request"]) {
     try {
       await stat(resolve(stateDirectory, file));
       throw new Error("State directory already contains event data; use a new directory");
@@ -94,6 +94,7 @@ export async function prepare(
     }
   }
   await atomicWrite(resolve(stateDirectory, "fallback.m3u"), fallback.order.map((id) => pool.find((track) => track.id === id)!.localPath).join("\n") + "\n");
+  await atomicWrite(resolve(stateDirectory, "planned-end.txt"), `${plannedEndMs / 1000}\n`);
   await atomicWrite(resolve(stateDirectory, "event.json"), JSON.stringify(state, null, 2) + "\n");
   return state;
 }

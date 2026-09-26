@@ -66,6 +66,13 @@ test("published schedule follows prepared fallback order after queued choices", 
   assert.deepEqual(buildSchedule(queued, 0), ["/music/c.mp3", "/music/f.mp3", "/music/e.mp3", "/music/d.mp3", "/music/b.mp3", "/music/a.mp3"]);
 });
 
+test("planned end blocks starts at and after the cutoff", () => {
+  const state = event();
+  state.plannedEndMs = 55 * minute;
+  assert.deepEqual(buildSchedule(state, 0), ["/music/a.mp3"]);
+  assert.deepEqual(buildSchedule(state, 55 * minute), []);
+});
+
 test("agent cannot use operator overrides", () => {
   assert.throws(() => addSelection(event(), "a", "agent", 0, "", { allowRepeats: true }), /Only operator/);
 });

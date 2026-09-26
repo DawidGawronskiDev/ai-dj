@@ -9,31 +9,25 @@ interface MixerMarker {
   startedAt: number;
 }
 
+interface CommitMarker {
+  filename: string;
+  at: number;
+}
+
 export async function syncOnce(stateDirectory: string): Promise<boolean> {
   const statePath = resolve(stateDirectory, "event.json");
   const markerPath = resolve(stateDirectory, "now-playing.json");
-  const committedPath = resolve(stateDirectory, "committed.txt");
+  const committedPath = resolve(stateDirectory, "committed.json");
   const state = JSON.parse(await readFile(statePath, "utf8")) as EventState;
-  if (state.status === "stopped") return false;
+  if (state.status === "stopped" || state.status === "paused") return false;
   let updated = state;
   let changed = false;
-  try {
-    const committedFile = (await readFile(committedPath, "utf8")).trim();
-    const first = updated.upcoming[0];
-    if (first && !first.committed && updated.pool.find((track) => track.id === first.trackId)?.localPath === committedFile) {
-      updated = commitIncoming(updated);
-      changed = true;
-    }
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  }
   let marker: MixerMarker;
   try {
     marker = JSON.parse(await readFile(markerPath, "utf8")) as MixerMarker;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      if (changed) await atomicWrite(statePath, JSON.stringify(updated, null, 2) + "\n");
-      return changed;
+      return false;
     }
     throw error;
   }
@@ -44,6 +38,20 @@ export async function syncOnce(stateDirectory: string): Promise<boolean> {
     if (!track) throw new Error(`Mixer played file outside event pool: ${marker.filename}`);
     updated = recordPlaybackStart(updated, track.id, startedAtMs);
     changed = true;
+  }
+  try {
+    const commit = JSON.parse(await readFile(committedPath, "utf8")) as CommitMarker;
+    if (typeof commit.filename !== "string" || !Number.isFinite(commit.at)) throw new Error("Invalid mixer commit marker");
+    const first = updated.upcoming[0];
+    const currentPath = updated.pool.find((track) => track.id === updated.current?.trackId)?.localPath;
+    if (first && !first.committed && currentPath === commit.filename &&
+        commit.at * 1000 >= (updated.current?.startedAtMs ?? Infinity) &&
+        updated.pool.find((track) => track.id === first.trackId)?.localPath !== commit.filename) {
+      updated = commitIncoming(updated);
+      changed = true;
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
   if (changed) await atomicWrite(statePath, JSON.stringify(updated, null, 2) + "\n");
   return changed;

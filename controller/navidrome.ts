@@ -1,0 +1,125 @@
+import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { createWriteStream } from "node:fs";
+import { mkdir, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import type { Manifest, ManifestTrack } from "./prepare.ts";
+
+export interface NavidromeConfig {
+  endpoint: string;
+  username: string;
+  password: string;
+  fetcher?: typeof fetch;
+}
+
+interface Song {
+  id: string;
+  title?: string;
+  artist?: string;
+  artistId?: string;
+  album?: string;
+  genre?: string;
+  year?: number;
+  duration?: number;
+  suffix?: string;
+}
+
+interface PlaylistResponse {
+  "subsonic-response"?: {
+    status?: string;
+    error?: { message?: string };
+    playlist?: { id?: string; entry?: Song[] | Song };
+  };
+}
+
+function subsonicUrl(config: NavidromeConfig, method: string, parameters: Record<string, string>): URL {
+  const base = config.endpoint.replace(/\/+$/, "");
+  const url = new URL(`${base}/rest/${method}.view`);
+  const salt = randomBytes(8).toString("hex");
+  const token = createHash("md5").update(config.password + salt).digest("hex");
+  for (const [key, value] of Object.entries({ u: config.username, t: token, s: salt, v: "1.16.1", c: "ai-dj", f: "json", ...parameters })) {
+    url.searchParams.set(key, value);
+  }
+  return url;
+}
+
+function fetcher(config: NavidromeConfig): typeof fetch {
+  return config.fetcher ?? fetch;
+}
+
+async function playlistSongs(config: NavidromeConfig, playlistId: string): Promise<Song[]> {
+  const response = await fetcher(config)(subsonicUrl(config, "getPlaylist", { id: playlistId }));
+  if (!response.ok) throw new Error(`Navidrome playlist request failed: HTTP ${response.status}`);
+  const payload = await response.json() as PlaylistResponse;
+  const body = payload["subsonic-response"];
+  if (body?.status !== "ok") throw new Error(`Navidrome playlist request failed: ${body?.error?.message ?? "invalid response"}`);
+  if (body.playlist?.id !== playlistId) throw new Error("Navidrome returned a different playlist");
+  const entries = body.playlist.entry;
+  return Array.isArray(entries) ? entries : entries ? [entries] : [];
+}
+
+async function downloadSong(config: NavidromeConfig, song: Song, musicDirectory: string, playlistId: string): Promise<string> {
+  const suffix = typeof song.suffix === "string" && /^[a-zA-Z0-9]{1,8}$/.test(song.suffix) ? song.suffix.toLowerCase() : "audio";
+  const playlistFolder = createHash("sha256").update(playlistId).digest("hex").slice(0, 16);
+  const trackName = createHash("sha256").update(song.id).digest("hex");
+  const relativeFile = `navidrome/${playlistFolder}/${trackName}.${suffix}`;
+  const destination = join(musicDirectory, relativeFile);
+  await mkdir(join(musicDirectory, "navidrome", playlistFolder), { recursive: true });
+  try {
+    if ((await stat(destination)).size > 0) return relativeFile;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  const response = await fetcher(config)(subsonicUrl(config, "download", { id: song.id }));
+  if (!response.ok || !response.body || response.headers.get("content-type")?.includes("json")) {
+    throw new Error(`Navidrome download failed for track ${song.id}: HTTP ${response.status}`);
+  }
+  const temporary = `${destination}.${randomUUID()}.part`;
+  try {
+    await pipeline(Readable.fromWeb(response.body as import("node:stream/web").ReadableStream), createWriteStream(temporary, { flags: "wx", mode: 0o600 }));
+    if ((await stat(temporary)).size === 0) throw new Error(`Navidrome returned an empty file for ${song.id}`);
+    await rename(temporary, destination);
+  } catch (error) {
+    await unlink(temporary).catch(() => {});
+    throw error;
+  }
+  return relativeFile;
+}
+
+/** Fetch playlist membership once, then download original files into a local cache. */
+export async function importNavidromePlaylist(
+  config: NavidromeConfig,
+  playlistId: string,
+  musicDirectory: string,
+  event: Pick<Manifest, "id" | "eventBrief" | "startsAt" | "plannedEnd">,
+): Promise<Manifest> {
+  if (!playlistId) throw new Error("Playlist id is required");
+  const songs = await playlistSongs(config, playlistId);
+  if (!songs.length) throw new Error("Navidrome playlist is empty");
+  const seen = new Set<string>();
+  const tracks: ManifestTrack[] = [];
+  for (const song of songs) {
+    if (typeof song.id !== "string" || !song.id) throw new Error("Playlist entry has no track id");
+    if (seen.has(song.id)) continue;
+    seen.add(song.id);
+    if (!Number.isFinite(song.duration) || (song.duration ?? 0) <= 5) throw new Error(`Track ${song.id} has no usable duration`);
+    const file = await downloadSong(config, song, musicDirectory, playlistId);
+    tracks.push({
+      id: song.id,
+      artistId: song.artistId || song.artist || "unknown-artist",
+      artist: song.artist || "Unknown artist",
+      title: song.title || song.id,
+      durationMs: Math.round(song.duration! * 1000),
+      file,
+      ...(song.album ? { album: song.album } : {}),
+      ...(song.genre ? { genre: song.genre } : {}),
+      ...(Number.isInteger(song.year) ? { year: song.year } : {}),
+    });
+  }
+  return { ...event, tracks };
+}
+
+export async function saveManifest(manifest: Manifest, path: string): Promise<void> {
+  await writeFile(path, JSON.stringify(manifest, null, 2) + "\n", { flag: "wx", mode: 0o600 });
+}

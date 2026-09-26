@@ -1,0 +1,33 @@
+services:
+  controller:
+    image: node:26-bookworm-slim
+    user: "${VENUE_UID:?Set VENUE_UID}:${VENUE_GID:?Set VENUE_GID}"
+    working_dir: /app
+    environment:
+      OPERATOR_PASSWORD: ${OPERATOR_PASSWORD:?Set OPERATOR_PASSWORD}
+    ports:
+      - "127.0.0.1:${CONTROLLER_PORT:-8787}:8787"
+    volumes:
+      - ./controller:/app/controller:ro
+      - ${STATE_DIR:?Set STATE_DIR}:/state
+    command: ["node", "/app/controller/serve.ts", "/state"]
+  icecast:
+    build: ./audio/icecast
+    environment:
+      ICECAST_SOURCE_PASSWORD: ${ICECAST_SOURCE_PASSWORD:?Set ICECAST_SOURCE_PASSWORD}
+      ICECAST_ADMIN_PASSWORD: ${ICECAST_ADMIN_PASSWORD:?Set ICECAST_ADMIN_PASSWORD}
+    ports:
+      - "${ICECAST_PORT:-8000}:8000"
+  liquidsoap:
+    image: savonet/liquidsoap:v2.4.5
+    user: "${VENUE_UID:?Set VENUE_UID}:${VENUE_GID:?Set VENUE_GID}"
+    depends_on:
+      - icecast
+    environment:
+      ICECAST_SOURCE_PASSWORD: ${ICECAST_SOURCE_PASSWORD:?Set ICECAST_SOURCE_PASSWORD}
+    volumes:
+      - ${MUSIC_DIR:?Set MUSIC_DIR}:/music:ro
+      - ${STATE_DIR:?Set STATE_DIR}:/state
+      - ./audio/radio.liq:/etc/liquidsoap/radio.liq:ro
+      - ./audio/filter-schedule.sh:/etc/liquidsoap/filter-schedule.sh:ro
+    command: ["/etc/liquidsoap/radio.liq"]

@@ -1,6 +1,6 @@
 # AI DJ v1 design
 
-Status: agreed on 2026-09-26. Controller and venue audio implementation is in progress; a synthetic end-to-end stream has passed, but the full venue rehearsal is pending.
+Status: agreed on 2026-09-26. Controller, autonomous selection, and venue audio implementation are in progress; synthetic playback and mock-backed model tests have passed, but the full venue rehearsal is pending.
 
 ## Stated brief
 

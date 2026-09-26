@@ -194,6 +194,26 @@ export function nextFallback(state: EventState, nowMs: number): EventState | nul
   return null;
 }
 
+/** The choices the agent may append after all currently planned tracks. */
+export function eligibleCandidates(state: EventState, nowMs: number): EventTrack[] {
+  if (state.status === "stopped" || state.status === "paused") return [];
+  validateQueue(state, state.upcoming, nowMs);
+  let startMs = state.current
+    ? Math.max(nowMs, state.current.startedAtMs + trackFor(state, state.current.trackId).durationMs - CROSSFADE_MS)
+    : nowMs;
+  const upcoming: PlannedTrack[] = [];
+  for (const entry of state.upcoming) {
+    const track = trackFor(state, entry.trackId);
+    upcoming.push({ trackId: track.id, artistId: track.artistId, expectedStartMs: startMs, expectedEndMs: startMs + track.durationMs });
+    startMs += track.durationMs - CROSSFADE_MS;
+  }
+  if (startMs >= state.plannedEndMs) return [];
+  return state.pool.filter((track) => checkSelection({
+    source: "agent", trackId: track.id, eventPool: state.pool,
+    history: selectionHistory(state), upcoming, expectedStartMs: startMs,
+  }).eligible);
+}
+
 /** Ordered validated queue followed by unused eligible local fallback tracks. */
 export function buildSchedule(state: EventState, nowMs: number): string[] {
   if (state.status === "stopped") return [];

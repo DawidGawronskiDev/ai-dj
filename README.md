@@ -1,6 +1,6 @@
 # AI DJ
 
-An autonomous music selector and occasional spoken host for a nightclub event, using Navidrome, GPT-6-Luna, Kokoro, Next.js, Liquidsoap, and Icecast. The controller and venue audio pipeline are runnable today; model selection, speech, and the operator web interface are still to come.
+An autonomous music selector and occasional spoken host for a nightclub event, using Navidrome, GPT-6-Luna, Kokoro, Next.js, Liquidsoap, and Icecast. The controller, autonomous selection, and venue audio pipeline are runnable today; speech and the operator web interface are still to come.
 
 Preparation freezes a Navidrome playlist into a local event pool. The controller checks pool membership, repeats, and a 30-minute artist gap before publishing a queue. Liquidsoap plays approved local files through Icecast, reports actual starts, and continues through its loaded fallback queue if the controller disconnects. Preparation requires five hours of unique, playable audio after crossfade overlap.
 
@@ -29,7 +29,7 @@ pnpm prepare ./event-manifest.json /absolute/path/to/music /absolute/path/to/new
 cp .env.example .env
 ```
 
-Use a new state directory for each event. Set `MUSIC_DIR`, `STATE_DIR`, three distinct passwords, and `VENUE_UID`/`VENUE_GID` in `.env`. On Linux, `id -u` and `id -g` provide the IDs; both services need write access to the state directory. Set `ICECAST_PORT` and `CONTROLLER_PORT` if the defaults conflict.
+Use a new state directory for each event. Set `MUSIC_DIR`, `STATE_DIR`, three distinct passwords, and `VENUE_UID`/`VENUE_GID` in `.env`. On Linux, `id -u` and `id -g` provide the IDs; both services need write access to the state directory. Set `OPENAI_API_KEY` to enable autonomous selection, or leave it blank for music-only local fallback. The default model is `gpt-6-luna`. Set `ICECAST_PORT` and `CONTROLLER_PORT` if the defaults conflict.
 
 ```sh
 docker compose up -d --build
@@ -48,6 +48,8 @@ curl http://127.0.0.1:8787/state -H "Authorization: Bearer $OPERATOR_PASSWORD"
 mpv http://127.0.0.1:8000/live.mp3
 ```
 
+With an API key, the controller starts selecting while the event is prepared and keeps up to two choices queued. Wait for `/state` to show those choices if you want the first track selected by the model; starting immediately may play the prepared local fallback first. Each selection uses up to six pool/history tool calls and has a 30-second deadline. The controller validates the returned ID against the frozen pool, history, artist gap, and current queue. Operator edits or steering received during a model call make its result stale and discard it. API errors leave the local schedule playing and retry in the background with backoff; the event state records a warning.
+
 The venue player should consume the Icecast URL on the dedicated audio machine. `/force-next` accepts `{"trackId":"..."}`; `/replace` accepts an `index` and `trackId`; `/reorder` accepts an `order` array of current queue indices. `/steer` accepts an `instruction`, `/mute` accepts `muted`, and `/extend` accepts a later `plannedEndMs`. `/skip` fades the current track for two seconds and advances; `/stop` fades it out over two seconds and ends the event. These commands use `POST` with JSON bodies and the same bearer token. Operator choices may override artist spacing with `{"operatorOverride":{"allowArtistSpacing":true}}`. Repeat overrides are not available through the live venue pipeline yet.
 
 The local schedule contains the validated queue followed by eligible unused fallback tracks. Liquidsoap reloads it on edits, records played paths in `played.txt`, and writes `now-playing.json`; the controller copies actual playback into `event.json`. Liquidsoap marks the incoming choice committed near the crossfade, preventing late replacement. Both controller and mixer enforce the planned end: it blocks new track starts, the current track finishes, and the controller marks the event stopped when available. The stream also ends when unique prepared tracks are exhausted.
@@ -56,7 +58,7 @@ On a mixer restart, played paths are filtered from the schedule and playback con
 
 Run `pnpm test`, `pnpm typecheck`, and `docker compose config --quiet` after changes. Liquidsoap can be checked with `docker run --rm -v "$PWD/audio/radio.liq:/radio.liq:ro" savonet/liquidsoap:v2.4.5 --check /radio.liq`.
 
-Remaining v1 work: autonomous model selection, Kokoro speech and ducking, a password-protected operator UI, and a full venue rehearsal with real audio. The Navidrome importer has mock-backed tests but has not yet been run against this venue's server. Command-to-speaker latency and fade quality still need measurement on the venue system.
+Remaining v1 work: Kokoro speech and ducking, a password-protected operator UI, and a full venue rehearsal with real audio. The Navidrome importer and OpenAI integration have mock-backed tests but have not yet been run against this venue's services or an API key. Command-to-speaker latency and fade quality still need measurement on the venue system.
 
 - [Agreed design and acceptance checks](docs/design-interview.md)
 - [Domain glossary](CONTEXT.md)

@@ -3,12 +3,13 @@ import { readFile } from "node:fs/promises";
 import { timingSafeEqual } from "node:crypto";
 import { resolve } from "node:path";
 import {
-  addSelection, buildSchedule, forceNext, reorderUpcoming, replaceUpcoming, steer,
+  addSelection, buildSchedule, eligibleCandidates, forceNext, reorderUpcoming, replaceUpcoming, steer,
   type EventState, type QueueEntry,
 } from "./event.ts";
 import { atomicWrite } from "./prepare.ts";
 import { syncOnce } from "./sync.ts";
 import { control, recoverOnStartup } from "./control.ts";
+import { applySelectionIfCurrent, selectTrack, type SelectorConfig } from "./selection.ts";
 
 type Body = Record<string, unknown>;
 
@@ -63,7 +64,7 @@ async function publish(stateDirectory: string, state: EventState): Promise<void>
   await atomicWrite(resolve(stateDirectory, "schedule.m3u"), paths.join("\n") + (paths.length ? "\n" : ""));
 }
 
-export function createControllerServer(stateDirectory: string, password: string) {
+export function createControllerServer(stateDirectory: string, password: string, selectorConfig?: SelectorConfig) {
   if (!password) throw new Error("OPERATOR_PASSWORD is required");
   let tail: Promise<void> = Promise.resolve();
   const serial = <T>(operation: () => Promise<T>): Promise<T> => {
@@ -84,6 +85,54 @@ export function createControllerServer(stateDirectory: string, password: string)
       }
     }).catch((error: unknown) => console.error("Controller sync failed:", error));
   }, 500);
+  let selectorTimer: NodeJS.Timeout | undefined;
+  let closed = false;
+  let selecting = false;
+  let nextSelectionMs = 0;
+  let retryMs = 5_000;
+  const noteWarning = async (warning: string): Promise<void> => {
+    if (closed) return;
+    await serial(async () => {
+      const state = await loadState(stateDirectory);
+      if (state.status === "stopped" || state.warnings.includes(warning)) return;
+      await atomicWrite(resolve(stateDirectory, "event.json"), JSON.stringify({
+        ...state, warnings: [...state.warnings, warning],
+      }, null, 2) + "\n");
+    });
+  };
+  const maybeSelect = async (): Promise<void> => {
+    if (closed || !selectorConfig?.apiKey || selecting || Date.now() < nextSelectionMs) return;
+    selecting = true;
+    try {
+      const snapshot = await serial(() => loadState(stateDirectory));
+      const nowMs = Date.now();
+      if ((snapshot.status !== "prepared" && snapshot.status !== "running") ||
+          snapshot.upcoming.length >= 2 || nowMs >= snapshot.plannedEndMs) return;
+      if (!eligibleCandidates(snapshot, nowMs).length) {
+        await noteWarning("No eligible track can start before the planned end");
+        nextSelectionMs = Date.now() + 30_000;
+        return;
+      }
+      const choice = await selectTrack(snapshot, selectorConfig, nowMs);
+      if (closed) return;
+      await serial(async () => {
+        const current = await loadState(stateDirectory);
+        const updated = applySelectionIfCurrent(snapshot, current, choice, Date.now());
+        if (!updated) return;
+        await atomicWrite(resolve(stateDirectory, "event.json"), JSON.stringify(updated, null, 2) + "\n");
+        await publish(stateDirectory, updated);
+      });
+      retryMs = 5_000;
+      nextSelectionMs = Date.now() + 1_000;
+    } catch (error) {
+      console.error("Autonomous selection failed:", error instanceof Error ? error.message : "Unknown error");
+      await noteWarning("AI selection unavailable; local fallback remains active").catch((warningError: unknown) => console.error(warningError));
+      nextSelectionMs = Date.now() + retryMs;
+      retryMs = Math.min(60_000, retryMs * 2);
+    } finally {
+      selecting = false;
+    }
+  };
   const server = createServer((request, response) => {
     if (!authenticated(request, password)) { send(response, 401, { error: "Unauthorized" }); return; }
     void serial(async () => {
@@ -139,12 +188,18 @@ export function createControllerServer(stateDirectory: string, password: string)
       send(response, error instanceof SyntaxError || message.startsWith("Track is ineligible") || message.startsWith("Invalid") || message.startsWith("Cannot skip") || message.startsWith("Only a") || message.startsWith("Planned end") || message.startsWith("allowRepeats") || message.includes("must be") || message.includes("committed") ? 400 : 500, { error: message });
     });
   });
-  server.on("close", () => clearInterval(timer));
-  return { server, ready: serial(async () => {
+  server.on("close", () => { closed = true; clearInterval(timer); if (selectorTimer) clearInterval(selectorTimer); });
+  const ready = serial(async () => {
     await recoverOnStartup(stateDirectory);
     await syncOnce(stateDirectory);
     await publish(stateDirectory, await loadState(stateDirectory));
-  }) };
+  });
+  if (selectorConfig?.apiKey) void ready.then(() => {
+    if (closed) return;
+    selectorTimer = setInterval(() => { void maybeSelect(); }, 2_000);
+    void maybeSelect();
+  }).catch(() => {});
+  return { server, ready };
 }
 
 if (process.argv[1]?.endsWith("/controller/serve.ts")) {
@@ -154,7 +209,9 @@ if (process.argv[1]?.endsWith("/controller/serve.ts")) {
     console.error("Usage: OPERATOR_PASSWORD=... node controller/serve.ts <state-directory>");
     process.exitCode = 1;
   } else {
-    const { server, ready } = createControllerServer(stateDirectory, password);
+    const apiKey = process.env.OPENAI_API_KEY;
+    const { server, ready } = createControllerServer(stateDirectory, password,
+      apiKey ? { apiKey, model: process.env.OPENAI_MODEL || "gpt-6-luna" } : undefined);
     ready.then(() => server.listen(Number(process.env.CONTROLLER_PORT ?? 8787), "0.0.0.0"))
       .catch((error: unknown) => { console.error(error); process.exitCode = 1; });
   }
